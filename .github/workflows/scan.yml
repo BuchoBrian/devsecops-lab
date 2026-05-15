@@ -119,7 +119,7 @@ jobs:
           push: true
           tags: |
             ${{ secrets.DOCKERHUB_USERNAME }}/hardened-wordpress:latest
-            ghcr.io/${{ github.repository_owner }}/hardened-wordpress:latest
+            ghcr.io/buchobrian/hardened-wordpress:latest
 
   #Job 3: Rescan the hardened image
   rescan-hardened:
@@ -159,7 +159,7 @@ jobs:
             -e WORDPRESS_DB_PASSWORD=wppass \
             -e WORDPRESS_DB_NAME=wordpress \
             -p 8081:80 \
-            ghcr.io/${{ github.repository_owner }}/hardened-wordpress:latest
+            ghcr.io/buchobrian/hardened-wordpress:latest
 
       - name: Wait for hardened WordPress
         run: |
@@ -201,3 +201,4 @@ jobs:
       - name: Cleanup
         if: always()
         run: docker rm -f wp-hardened wp-db-h || true
+
