@@ -1,0 +1,39 @@
+FROM wordpress:6.5-php8.2-apache
+
+#Update all OS packages to patch CVEs
+RUN apt-get update && apt-get upgrade -y \
+    && apt-get remove -y telnet wget \
+    && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/*
+
+#Suppress server version in headers
+RUN echo "ServerTokens Prod" >> /etc/apache2/apache2.conf \
+    && echo "ServerSignature Off" >> /etc/apache2/apache2.conf \
+    && echo "TraceEnable Off" >> /etc/apache2/apache2.conf
+
+#Block XML-RPC
+RUN echo '<Files "xmlrpc.php">\n  Order Deny,Allow\n  Deny from all\n</Files>' \
+    > /etc/apache2/conf-available/block-xmlrpc.conf \
+    && a2enconf block-xmlrpc
+
+#Add security headers
+RUN echo '<IfModule mod_headers.c>\n  Header always set X-Frame-Options "SAMEORIGIN"\n  Header always set X-Content-Type-Options "nosniff"\n  Header always set X-XSS-Protection "1; mode=block"\n</IfModule>' \
+    > /etc/apache2/conf-available/security-headers.conf \
+    && a2enconf security-headers
+
+#Set strict file permissions
+RUN find /var/www/html -type d -exec chmod 755 {} \; \
+    && find /var/www/html -type f -exec chmod 644 {} \;
+
+#Create non-root user to run Apache
+RUN groupadd -r wpgroup \
+    && useradd -r -g wpgroup -s /sbin/nologin wpuser \
+    && chown -R wpuser:wpgroup /var/www/html \
+    && chown -R wpuser:wpgroup /var/log/apache2 \
+    && chown -R wpuser:wpgroup /var/run/apache2
+
+RUN sed -i 's/^export APACHE_RUN_USER=.*/export APACHE_RUN_USER=wpuser/' /etc/apache2/envvars \
+    && sed -i 's/^export APACHE_RUN_GROUP=.*/export APACHE_RUN_GROUP=wpgroup/' /etc/apache2/envvars
+
+EXPOSE 80
+CMD ["apache2-foreground"]

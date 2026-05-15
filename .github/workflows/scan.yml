@@ -1,0 +1,203 @@
+name: WordPress WPScan – DevSecOps Pipeline
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+
+  #Job 1: Scan the initial
+  wordpress-wpscan:
+    name: Scan vulnerable WordPress
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Start MySQL container
+        run: |
+          docker run -d --name wp-db \
+            -e MYSQL_ROOT_PASSWORD=password \
+            -e MYSQL_DATABASE=wordpress \
+            -e MYSQL_USER=wpuser \
+            -e MYSQL_PASSWORD=wppass \
+            mysql:8.0
+
+      - name: Start WordPress container
+        run: |
+          docker run -d --name wp-site \
+            --link wp-db:mysql \
+            -e WORDPRESS_DB_HOST=mysql:3306 \
+            -e WORDPRESS_DB_USER=wpuser \
+            -e WORDPRESS_DB_PASSWORD=wppass \
+            -e WORDPRESS_DB_NAME=wordpress \
+            -p 8080:80 \
+            wordpress:6.3.1-php8.0-apache
+
+      - name: Wait for WordPress to be ready
+        run: |
+          echo "Waiting for WordPress..."
+          for i in {1..40}; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/ || echo "000")
+            if [[ "$STATUS" == "200" || "$STATUS" == "302" || "$STATUS" == "301" ]]; then
+              echo "WordPress ready (HTTP $STATUS)"
+              break
+            fi
+            echo "Attempt $i: HTTP $STATUS – waiting..."
+            sleep 5
+          done
+
+      - name: Install WPScan
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ruby-full build-essential libcurl4-openssl-dev zlib1g-dev
+          sudo gem install wpscan --no-document
+
+      - name: Run WPScan (pre-hardening)
+        env:
+          WPSCAN_API_TOKEN: ${{ secrets.WPSCAN_API_TOKEN }}
+        run: |
+          mkdir -p scans
+          wpscan \
+            --url http://localhost:8080 \
+            --enumerate u,vp,vt \
+            --force \
+            --no-banner \
+            --api-token "$WPSCAN_API_TOKEN" \
+            --output scans/wpscan_ci_pre_hardening.txt || true
+          cat scans/wpscan_ci_pre_hardening.txt
+
+      - name: Save scan as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: scan-pre-hardening-${{ github.run_number }}
+          path: scans/wpscan_ci_pre_hardening.txt
+
+      - name: Cleanup containers
+        if: always()
+        run: docker rm -f wp-site wp-db || true
+
+  #Job 2: Build & push hardened image
+  build-hardened-image:
+    name: Build and push hardened image
+    runs-on: ubuntu-latest
+    needs: wordpress-wpscan
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: ./docker
+          file: ./docker/Dockerfile.hardened
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/hardened-wordpress:latest
+            ghcr.io/${{ github.repository_owner }}/hardened-wordpress:latest
+
+  #Job 3: Rescan the hardened image
+  rescan-hardened:
+    name: Verify hardened image
+    runs-on: ubuntu-latest
+    needs: build-hardened-image
+    permissions:
+      contents: write
+      packages: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Start MySQL
+        run: |
+          docker run -d --name wp-db-h \
+            -e MYSQL_ROOT_PASSWORD=password \
+            -e MYSQL_DATABASE=wordpress \
+            -e MYSQL_USER=wpuser \
+            -e MYSQL_PASSWORD=wppass \
+            mysql:8.0
+
+      - name: Start hardened WordPress
+        run: |
+          docker run -d --name wp-hardened \
+            --link wp-db-h:mysql \
+            -e WORDPRESS_DB_HOST=mysql:3306 \
+            -e WORDPRESS_DB_USER=wpuser \
+            -e WORDPRESS_DB_PASSWORD=wppass \
+            -e WORDPRESS_DB_NAME=wordpress \
+            -p 8081:80 \
+            ghcr.io/${{ github.repository_owner }}/hardened-wordpress:latest
+
+      - name: Wait for hardened WordPress
+        run: |
+          for i in {1..40}; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8081/ || echo "000")
+            if [[ "$STATUS" == "200" || "$STATUS" == "302" ]]; then
+              echo "Ready (HTTP $STATUS)"
+              break
+            fi
+            sleep 5
+          done
+
+      - name: Install WPScan
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ruby-full build-essential libcurl4-openssl-dev zlib1g-dev
+          sudo gem install wpscan --no-document
+
+      - name: Run WPScan (post-hardening)
+        env:
+          WPSCAN_API_TOKEN: ${{ secrets.WPSCAN_API_TOKEN }}
+        run: |
+          mkdir -p scans
+          wpscan \
+            --url http://localhost:8081 \
+            --enumerate u,vp,vt \
+            --force \
+            --no-banner \
+            --api-token "$WPSCAN_API_TOKEN" \
+            --output scans/wpscan_ci_post_hardening.txt || true
+          cat scans/wpscan_ci_post_hardening.txt
+
+      - name: Save post-hardening scan artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: scan-post-hardening-${{ github.run_number }}
+          path: scans/wpscan_ci_post_hardening.txt
+
+      - name: Cleanup
+        if: always()
+        run: docker rm -f wp-hardened wp-db-h || true

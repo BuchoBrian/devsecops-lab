@@ -1,0 +1,32 @@
+version: "3.8"
+
+services:
+  db:
+    image: mysql:8.0
+    container_name: wp-db-hardened
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword123
+      MYSQL_DATABASE: wordpress
+      MYSQL_USER: wpuser
+      MYSQL_PASSWORD: wppassword123
+    networks:
+      - wp-hardened
+
+  wordpress:
+    image: hardened-wordpress:local
+    container_name: wp-hardened
+    depends_on:
+      - db
+    environment:
+      WORDPRESS_DB_HOST: db:3306
+      WORDPRESS_DB_USER: wpuser
+      WORDPRESS_DB_PASSWORD: wppassword123
+      WORDPRESS_DB_NAME: wordpress
+    ports:
+      - "8081:80"
+    networks:
+      - wp-hardened
+
+networks:
+  wp-hardened:
+    driver: bridge
